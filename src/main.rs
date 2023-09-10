@@ -1,11 +1,11 @@
 use serde_json;
 use std::{env, fs::File, io::Read, path::Path};
 
-use crate::parser::Parser;
+use crate::{hasher::bytes_to_hex, parser::Parser};
 use sha1::{Digest, Sha1};
 
+mod hasher;
 mod parser;
-
 // Available if you need it!
 use serde_bencode;
 
@@ -149,57 +149,13 @@ fn main() {
         hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
         let res = hasher.finalize();
         println!("Info Hash: {:x}", res);
-        // // println!("contents: {:?}", contents);
 
-        // let binary_data_start = contents
-        //     .iter()
-        //     .position(|&x| x >= 128)
-        //     .unwrap_or(contents.len());
+        println!("Piece Length: {}", result.info.piece_length);
 
-        // // Convert the UTF-8 portion to a valid string
-        // let utf8_text: String = contents[..binary_data_start]
-        //     .iter()
-        //     .map(|&byte| byte as char)
-        //     .collect();
+        println!("Piece Hashes:");
 
-        // // Extract the binary data portion
-        // let binary_data: &[u8] = &contents[binary_data_start..];
-
-        // // // // Print the UTF-8 text
-        // // println!("UTF-8 Text: {}", utf8_text);
-        // // // // You can work with the binary data separately
-        // // println!("Binary Data: {:?}", binary_data);
-
-        // // println!("SHA1 Hash: {:x}", result);
-
-        // let (decoded_value, _) = decode_bencoded_value(&utf8_text, 0);
-
-        // // println!("{}", decoded_value.to_string());
-        // let url = &decoded_value["announce"];
-        // println!("Tracker URL: {}", url.as_str().unwrap());
-        // let length = &decoded_value["info"]["length"];
-        // println!("Length: {}", length);
-
-        // let name = &decoded_value["info"]["name"];
-        // let piece_length = &decoded_value["info"]["piece length"];
-        // let pieces = binary_data;
-        // let length = &decoded_value["info"]["length"];
-
-        // let product = Product {
-        //     length: length.as_u64().unwrap() as usize,
-        //     name: name.as_str().unwrap().to_string(),
-        //     piece_length: piece_length.as_u64().unwrap() as usize,
-        //     pieces: pieces.to_vec(),
-        // };
-
-        // let bencoding = serde_bencode::to_string(&product).unwrap();
-
-        // // println!("bencoding: {}", bencoding);
-
-        // let mut hasher = Sha1::new();
-
-        // hasher.update(&bencoding);
-        // let result = hasher.finalize();
-        // println!("Info Hash: {:x}", result);
+        for piece in result.info.pieces.chunks(20) {
+            println!("{}", bytes_to_hex(piece));
+        }
     }
 }
