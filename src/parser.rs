@@ -24,12 +24,30 @@ impl TorrentInfo {
         hasher.update(serde_bencode::to_bytes(self)?);
         Ok(hasher.finalize().to_vec())
     }
+
+    pub fn sha1_hashes_to_hex(&self) -> Result<Vec<String>> {
+        let mut hasher = Sha1::default();
+        let sha1_hashes: Vec<String> = self
+            .pieces
+            .chunks(20) // Assuming each SHA-1 hash is 20 bytes
+            .map(|chunk| {
+                hasher.update(chunk);
+                let result = hasher.finalize_reset();
+                format!("{:x}", result)
+            })
+            .collect();
+        Ok(sha1_hashes)
+    }
 }
 impl Parser {
     pub fn new() -> Self {
         Self::default()
     }
-
+    pub fn decode_input(&mut self, input: String) -> Result<Value> {
+        let input = input.as_bytes();
+        let result = serde_bencode::from_bytes::<Value>(input);
+        result.map_err(|e| anyhow!("Failed to parse input: {}", e))
+    }
     pub fn parse_torrent_file(&mut self, input: &[u8]) -> Result<TorrentFile> {
         serde_bencode::from_bytes(input).map_err(|e| anyhow!("Failed to parse input: {}", e))
     }

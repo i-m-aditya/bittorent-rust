@@ -1,7 +1,8 @@
-use serde_json;
+use anyhow::Error;
+use clap::{Parser, Subcommand};
 use std::{env, fs::File, io::Read, path::Path};
 
-use crate::{hasher::bytes_to_hex, parser::Parser};
+use crate::{hasher::bytes_to_hex, parser::Parser as OtherParser};
 use sha1::{Digest, Sha1};
 
 mod hasher;
@@ -33,6 +34,21 @@ fn find_e_for_index(s: &str, index: usize) -> usize {
     return 0;
 }
 
+#[derive(Parser, Debug)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    #[clap(name = "decode")]
+    Decode { string: String },
+    #[clap(name = "info")]
+    Info { path: String },
+    #[clap(name = "peers")]
+    Peers { path: String },
+}
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str, index: usize) -> (serde_json::Value, usize) {
     // println!("encoded_value: {}", encoded_value);
@@ -116,46 +132,162 @@ fn decode_bencoded_value(encoded_value: &str, index: usize) -> (serde_json::Valu
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    // println!("args: {:?}", args);
-    let command = &args[1];
+fn main() -> Result<(), Error> {
+    let cli = Cli::parse();
 
-    if command == "decode" {
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
-        // println!("Logs from your program will appear here!");
+    match cli.command {
+        Commands::Decode { string } => {
+            let (decoded_value, _) = decode_bencoded_value(&string, 0);
+            println!("{}", decoded_value.to_string());
+        }
+        Commands::Info { path } => {
+            let filepath = env::current_dir()?.join(Path::new(&path));
 
-        // Uncomment this block to pass the first stage
-        let encoded_value = &args[2];
-        let (decoded_value, _) = decode_bencoded_value(encoded_value, 0);
-        println!("{}", decoded_value.to_string());
-    } else if command == "info" {
-        let current_dir = env::current_dir().unwrap();
+            let mut file = File::open(filepath).unwrap();
 
-        let filename = args[2].clone();
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).unwrap();
 
-        let filepath = current_dir.join(Path::new(&filename));
+            let result = OtherParser::new().parse_torrent_file(&contents).unwrap();
 
-        let mut file = File::open(filepath).unwrap();
+            println!("Tracker URL: {}", result.announce);
+            println!("Length: {}", result.info.length);
+            let mut hasher = Sha1::default();
+            hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
+            let res = hasher.finalize();
+            println!("Info Hash: {:x}", res);
 
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents).unwrap();
+            println!("Piece Length: {}", result.info.piece_length);
 
-        let result = Parser::new().parse_torrent_file(&contents).unwrap();
+            println!("Piece Hashes:");
 
-        println!("Tracker URL: {}", result.announce);
-        println!("Length: {}", result.info.length);
-        let mut hasher = Sha1::default();
-        hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
-        let res = hasher.finalize();
-        println!("Info Hash: {:x}", res);
+            for piece in result.info.pieces.chunks(20) {
+                println!("{}", bytes_to_hex(piece));
+            }
+        }
+        Commands::Peers { path } => {
+            let filepath = env::current_dir()?.join(Path::new(&path));
 
-        println!("Piece Length: {}", result.info.piece_length);
+            let mut file = File::open(filepath).unwrap();
 
-        println!("Piece Hashes:");
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).unwrap();
 
-        for piece in result.info.pieces.chunks(20) {
-            println!("{}", bytes_to_hex(piece));
+            let result = OtherParser::new().parse_torrent_file(&contents).unwrap();
+
+            println!("Tracker URL: {}", result.announce);
+            println!("Length: {}", result.info.length);
+            let mut hasher = Sha1::default();
+            hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
+
+            let info_hash = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("%{:02x}", b))
+                .collect::<Vec<String>>()
+                .join("");
+
+            println!("Info Hash: {}", info_hash);
+
+            let client = reqwest::blocking::Client::new();
+
+            let url = format!("{}?info_hash={}", result.announce, info_hash);
+
+            let req = client
+                .get(url)
+                .query(&[
+                    ("peer_id", String::from("-TR2940-5f2b3b3b3b3b")),
+                    ("port", String::from("6881")),
+                    ("uploaded", String::from("0")),
+                    ("downloaded", String::from("0")),
+                    ("left", result.info.length.to_string()),
+                    ("compact", String::from("1")),
+                ])
+                .build()?;
+            let response = client.execute(req).unwrap().bytes().unwrap();
+
+            println!("Response: {:?}", response);
         }
     }
+
+    // if command == "decode" {
+    //     // You can use print statements as follows for debugging, they'll be visible when running tests.
+    //     // println!("Logs from your program will appear here!");
+
+    //     // Uncomment this block to pass the first stage
+    //     let encoded_value = &args[2];
+    //     let (decoded_value, _) = decode_bencoded_value(encoded_value, 0);
+    //     println!("{}", decoded_value.to_string());
+    // } else if command == "info" {
+    //     let current_dir = env::current_dir().unwrap();
+    //     let filename = args[2].clone();
+    //     let filepath = current_dir.join(Path::new(&filename));
+
+    //     let mut file = File::open(filepath).unwrap();
+
+    //     let mut contents = Vec::new();
+    //     file.read_to_end(&mut contents).unwrap();
+
+    //     let result = Parser::new().parse_torrent_file(&contents).unwrap();
+
+    //     println!("Tracker URL: {}", result.announce);
+    //     println!("Length: {}", result.info.length);
+    //     let mut hasher = Sha1::default();
+    //     hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
+    //     let res = hasher.finalize();
+    //     println!("Info Hash: {:x}", res);
+
+    //     println!("Piece Length: {}", result.info.piece_length);
+
+    //     println!("Piece Hashes:");
+
+    //     for piece in result.info.pieces.chunks(20) {
+    //         println!("{}", bytes_to_hex(piece));
+    //     }
+    // } else if command == "peers" {
+    //     let current_dir = env::current_dir().unwrap();
+    //     let filename = args[2].clone();
+    //     let filepath = current_dir.join(Path::new(&filename));
+
+    //     let mut file = File::open(filepath).unwrap();
+
+    //     let mut contents = Vec::new();
+    //     file.read_to_end(&mut contents).unwrap();
+
+    //     let result = Parser::new().parse_torrent_file(&contents).unwrap();
+
+    //     println!("Tracker URL: {}", result.announce);
+    //     println!("Length: {}", result.info.length);
+    //     let mut hasher = Sha1::default();
+    //     hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
+
+    //     let info_hash = hasher
+    //         .finalize()
+    //         .iter()
+    //         .map(|b| format!("%{:02x}", b))
+    //         .collect::<Vec<String>>()
+    //         .join("");
+
+    //     println!("Info Hash: {}", info_hash);
+
+    //     let client = reqwest::blocking::Client::new();
+
+    //     let url = format!("{}?info_hash={}", result.announce, info_hash);
+
+    //     let req = client
+    //         .get(url)
+    //         .query(&[
+    //             ("peer_id", String::from("-TR2940-5f2b3b3b3b3b")),
+    //             ("port", String::from("6881")),
+    //             ("uploaded", String::from("0")),
+    //             ("downloaded", String::from("0")),
+    //             ("left", result.info.length.to_string()),
+    //             ("compact", String::from("1")),
+    //         ])
+    //         .build()?;
+    //     let response = client.execute(req).unwrap().bytes().unwrap();
+
+    //     println!("Response: {:?}", response);
+    // }
+    Ok(())
 }
