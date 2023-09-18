@@ -1,9 +1,17 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_bencode::value::Value;
 use sha1::{Digest, Sha1};
 #[derive(Debug, Default)]
 pub struct Parser {}
+
+impl Parser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn parse_torrent_file(&mut self, input: &[u8]) -> Result<TorrentFile> {
+        serde_bencode::from_bytes(input).map_err(|e| anyhow!("Failed to parse input: {}", e))
+    }
+}
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TorrentFile {
     pub announce: String,
@@ -37,18 +45,5 @@ impl TorrentInfo {
             })
             .collect();
         Ok(sha1_hashes)
-    }
-}
-impl Parser {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn decode_input(&mut self, input: String) -> Result<Value> {
-        let input = input.as_bytes();
-        let result = serde_bencode::from_bytes::<Value>(input);
-        result.map_err(|e| anyhow!("Failed to parse input: {}", e))
-    }
-    pub fn parse_torrent_file(&mut self, input: &[u8]) -> Result<TorrentFile> {
-        serde_bencode::from_bytes(input).map_err(|e| anyhow!("Failed to parse input: {}", e))
     }
 }

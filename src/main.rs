@@ -1,14 +1,28 @@
-use anyhow::Error;
-use clap::{Parser, Subcommand};
-use std::{env, fs::File, io::Read, path::Path};
+use anyhow::{anyhow, Error};
+use clap::{Args, Parser, Subcommand};
+use std::{
+    env,
+    fs::File,
+    io::{Read, Write},
+    net::{SocketAddr, SocketAddrV4},
+    path::Path,
+    str::FromStr,
+};
+use tcp::Connection;
+mod tcp;
 
-use crate::{hasher::bytes_to_hex, parser::Parser as OtherParser};
-use sha1::{Digest, Sha1};
+use std::net::Ipv4Addr;
+
+use crate::{hasher::hash_bytes_and_hex, parser::Parser as OtherParser};
 
 mod hasher;
 mod parser;
+mod request;
 // Available if you need it!
 use serde_bencode;
+
+use hasher::{bytes_to_hex, bytes_to_hex_url_encoded, hash_bytes};
+use request::TrackerResponse;
 
 fn find_e_for_index(s: &str, index: usize) -> usize {
     let mut count = 1;
@@ -48,6 +62,21 @@ enum Commands {
     Info { path: String },
     #[clap(name = "peers")]
     Peers { path: String },
+    #[clap(name = "handshake")]
+    Handshake { path: String, url: String },
+    #[clap(name = "download_piece")]
+    DownloadPiece(DownloadPieceArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct DownloadPieceArgs {
+    #[clap(short, long, help = "Peer address")]
+    address: Option<SocketAddrV4>,
+    #[clap(short, long, help = "File path")]
+    output: Option<String>,
+    #[clap(short, long, help = "Debug mode")]
+    debug: Option<bool>,
+    piece: usize,
 }
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str, index: usize) -> (serde_json::Value, usize) {
@@ -148,20 +177,21 @@ fn main() -> Result<(), Error> {
             let mut contents = Vec::new();
             file.read_to_end(&mut contents).unwrap();
 
-            let result = OtherParser::new().parse_torrent_file(&contents).unwrap();
+            let torrent_file = OtherParser::new().parse_torrent_file(&contents).unwrap();
 
-            println!("Tracker URL: {}", result.announce);
-            println!("Length: {}", result.info.length);
-            let mut hasher = Sha1::default();
-            hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
-            let res = hasher.finalize();
-            println!("Info Hash: {:x}", res);
+            println!("Tracker URL: {}", torrent_file.announce);
+            println!("Length: {}", torrent_file.info.length);
 
-            println!("Piece Length: {}", result.info.piece_length);
+            println!(
+                "Info Hash: {}",
+                hash_bytes_and_hex(&serde_bencode::to_bytes(&torrent_file.info)?)
+            );
+
+            println!("Piece Length: {}", torrent_file.info.piece_length);
 
             println!("Piece Hashes:");
 
-            for piece in result.info.pieces.chunks(20) {
+            for piece in torrent_file.info.pieces.chunks(20) {
                 println!("{}", bytes_to_hex(piece));
             }
         }
@@ -173,25 +203,13 @@ fn main() -> Result<(), Error> {
             let mut contents = Vec::new();
             file.read_to_end(&mut contents).unwrap();
 
-            let result = OtherParser::new().parse_torrent_file(&contents).unwrap();
+            let torrent_file = OtherParser::new().parse_torrent_file(&contents).unwrap();
 
-            println!("Tracker URL: {}", result.announce);
-            println!("Length: {}", result.info.length);
-            let mut hasher = Sha1::default();
-            hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
-
-            let info_hash = hasher
-                .finalize()
-                .iter()
-                .map(|b| format!("%{:02x}", b))
-                .collect::<Vec<String>>()
-                .join("");
-
-            println!("Info Hash: {}", info_hash);
+            let info_hash = bytes_to_hex_url_encoded(&serde_bencode::to_bytes(&torrent_file.info)?);
 
             let client = reqwest::blocking::Client::new();
 
-            let url = format!("{}?info_hash={}", result.announce, info_hash);
+            let url = format!("{}?info_hash={}", torrent_file.announce, info_hash);
 
             let req = client
                 .get(url)
@@ -200,94 +218,50 @@ fn main() -> Result<(), Error> {
                     ("port", String::from("6881")),
                     ("uploaded", String::from("0")),
                     ("downloaded", String::from("0")),
-                    ("left", result.info.length.to_string()),
+                    ("left", torrent_file.info.length.to_string()),
                     ("compact", String::from("1")),
                 ])
                 .build()?;
             let response = client.execute(req).unwrap().bytes().unwrap();
 
-            println!("Response: {:?}", response);
+            // println!("{:?}", response);
+
+            let tracker_response = serde_bencode::from_bytes::<TrackerResponse>(&response)?;
+
+            let mut peers = Vec::<(Ipv4Addr, u16)>::new();
+            for peer in tracker_response.peers.chunks(6) {
+                let mut ip = [0u8; 4];
+                ip.copy_from_slice(&peer[..4]);
+                let port = u16::from_be_bytes([peer[4], peer[5]]);
+                peers.push((Ipv4Addr::from(ip), port));
+            }
+
+            for peer in peers {
+                println!("{}:{}", peer.0, peer.1);
+            }
+
+            // let mut peers: Vec<String> = Vec::new();
+        }
+        Commands::Handshake { path, url } => {
+            let filepath = env::current_dir()?.join(Path::new(&path));
+            let mut file = File::open(filepath).unwrap();
+
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).unwrap();
+
+            let torrent_file = OtherParser::new().parse_torrent_file(&contents).unwrap();
+
+            let infohash = hash_bytes(&serde_bencode::to_bytes(&torrent_file.info)?);
+
+            let mut connection = Connection::new(url);
+            let peer_id = connection.handshake(&infohash.to_vec());
+
+            println!("Peer ID: {}", peer_id);
+        }
+        Commands::DownloadPiece(download_piece_args) => {
+            println!("Download Piece Args: {:?}", download_piece_args);
         }
     }
 
-    // if command == "decode" {
-    //     // You can use print statements as follows for debugging, they'll be visible when running tests.
-    //     // println!("Logs from your program will appear here!");
-
-    //     // Uncomment this block to pass the first stage
-    //     let encoded_value = &args[2];
-    //     let (decoded_value, _) = decode_bencoded_value(encoded_value, 0);
-    //     println!("{}", decoded_value.to_string());
-    // } else if command == "info" {
-    //     let current_dir = env::current_dir().unwrap();
-    //     let filename = args[2].clone();
-    //     let filepath = current_dir.join(Path::new(&filename));
-
-    //     let mut file = File::open(filepath).unwrap();
-
-    //     let mut contents = Vec::new();
-    //     file.read_to_end(&mut contents).unwrap();
-
-    //     let result = Parser::new().parse_torrent_file(&contents).unwrap();
-
-    //     println!("Tracker URL: {}", result.announce);
-    //     println!("Length: {}", result.info.length);
-    //     let mut hasher = Sha1::default();
-    //     hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
-    //     let res = hasher.finalize();
-    //     println!("Info Hash: {:x}", res);
-
-    //     println!("Piece Length: {}", result.info.piece_length);
-
-    //     println!("Piece Hashes:");
-
-    //     for piece in result.info.pieces.chunks(20) {
-    //         println!("{}", bytes_to_hex(piece));
-    //     }
-    // } else if command == "peers" {
-    //     let current_dir = env::current_dir().unwrap();
-    //     let filename = args[2].clone();
-    //     let filepath = current_dir.join(Path::new(&filename));
-
-    //     let mut file = File::open(filepath).unwrap();
-
-    //     let mut contents = Vec::new();
-    //     file.read_to_end(&mut contents).unwrap();
-
-    //     let result = Parser::new().parse_torrent_file(&contents).unwrap();
-
-    //     println!("Tracker URL: {}", result.announce);
-    //     println!("Length: {}", result.info.length);
-    //     let mut hasher = Sha1::default();
-    //     hasher.update(serde_bencode::to_bytes(&result.info).unwrap());
-
-    //     let info_hash = hasher
-    //         .finalize()
-    //         .iter()
-    //         .map(|b| format!("%{:02x}", b))
-    //         .collect::<Vec<String>>()
-    //         .join("");
-
-    //     println!("Info Hash: {}", info_hash);
-
-    //     let client = reqwest::blocking::Client::new();
-
-    //     let url = format!("{}?info_hash={}", result.announce, info_hash);
-
-    //     let req = client
-    //         .get(url)
-    //         .query(&[
-    //             ("peer_id", String::from("-TR2940-5f2b3b3b3b3b")),
-    //             ("port", String::from("6881")),
-    //             ("uploaded", String::from("0")),
-    //             ("downloaded", String::from("0")),
-    //             ("left", result.info.length.to_string()),
-    //             ("compact", String::from("1")),
-    //         ])
-    //         .build()?;
-    //     let response = client.execute(req).unwrap().bytes().unwrap();
-
-    //     println!("Response: {:?}", response);
-    // }
     Ok(())
 }
