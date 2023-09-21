@@ -1,19 +1,10 @@
-use anyhow::{anyhow, Error};
+use anyhow::Error;
 use clap::{Args, Parser, Subcommand};
-use std::{
-    env,
-    fs::File,
-    io::{Read, Write},
-    net::{SocketAddr, SocketAddrV4},
-    path::Path,
-    str::FromStr,
-};
+use std::net::SocketAddrV4;
 use tcp::Connection;
 mod tcp;
 
-use std::net::Ipv4Addr;
-
-use crate::{hasher::hash_bytes_and_hex, parser::Parser as OtherParser};
+use crate::{hasher::hash_bytes_and_hex, parser::TorrentFile};
 
 mod hasher;
 mod parser;
@@ -21,8 +12,7 @@ mod request;
 // Available if you need it!
 use serde_bencode;
 
-use hasher::{bytes_to_hex, bytes_to_hex_url_encoded, hash_bytes};
-use request::TrackerResponse;
+use hasher::{bytes_to_hex, hash_bytes};
 
 fn find_e_for_index(s: &str, index: usize) -> usize {
     let mut count = 1;
@@ -76,6 +66,7 @@ pub struct DownloadPieceArgs {
     output: Option<String>,
     #[clap(short, long, help = "Debug mode")]
     debug: Option<bool>,
+    file_path: String,
     piece: usize,
 }
 #[allow(dead_code)]
@@ -170,14 +161,7 @@ fn main() -> Result<(), Error> {
             println!("{}", decoded_value.to_string());
         }
         Commands::Info { path } => {
-            let filepath = env::current_dir()?.join(Path::new(&path));
-
-            let mut file = File::open(filepath).unwrap();
-
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).unwrap();
-
-            let torrent_file = OtherParser::new().parse_torrent_file(&contents).unwrap();
+            let torrent_file = TorrentFile::parse_file_from_path(&path)?;
 
             println!("Tracker URL: {}", torrent_file.announce);
             println!("Length: {}", torrent_file.info.length);
@@ -196,45 +180,10 @@ fn main() -> Result<(), Error> {
             }
         }
         Commands::Peers { path } => {
-            let filepath = env::current_dir()?.join(Path::new(&path));
+            let torrent_file = TorrentFile::parse_file_from_path(&path)?;
+            println!("Torrent File: {:?}", torrent_file);
 
-            let mut file = File::open(filepath).unwrap();
-
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).unwrap();
-
-            let torrent_file = OtherParser::new().parse_torrent_file(&contents).unwrap();
-
-            let info_hash = bytes_to_hex_url_encoded(&serde_bencode::to_bytes(&torrent_file.info)?);
-
-            let client = reqwest::blocking::Client::new();
-
-            let url = format!("{}?info_hash={}", torrent_file.announce, info_hash);
-
-            let req = client
-                .get(url)
-                .query(&[
-                    ("peer_id", String::from("-TR2940-5f2b3b3b3b3b")),
-                    ("port", String::from("6881")),
-                    ("uploaded", String::from("0")),
-                    ("downloaded", String::from("0")),
-                    ("left", torrent_file.info.length.to_string()),
-                    ("compact", String::from("1")),
-                ])
-                .build()?;
-            let response = client.execute(req).unwrap().bytes().unwrap();
-
-            // println!("{:?}", response);
-
-            let tracker_response = serde_bencode::from_bytes::<TrackerResponse>(&response)?;
-
-            let mut peers = Vec::<(Ipv4Addr, u16)>::new();
-            for peer in tracker_response.peers.chunks(6) {
-                let mut ip = [0u8; 4];
-                ip.copy_from_slice(&peer[..4]);
-                let port = u16::from_be_bytes([peer[4], peer[5]]);
-                peers.push((Ipv4Addr::from(ip), port));
-            }
+            let peers = torrent_file.discover_peers()?;
 
             for peer in peers {
                 println!("{}:{}", peer.0, peer.1);
@@ -243,23 +192,30 @@ fn main() -> Result<(), Error> {
             // let mut peers: Vec<String> = Vec::new();
         }
         Commands::Handshake { path, url } => {
-            let filepath = env::current_dir()?.join(Path::new(&path));
-            let mut file = File::open(filepath).unwrap();
-
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).unwrap();
-
-            let torrent_file = OtherParser::new().parse_torrent_file(&contents).unwrap();
-
+            let torrent_file = TorrentFile::parse_file_from_path(&path)?;
             let infohash = hash_bytes(&serde_bencode::to_bytes(&torrent_file.info)?);
 
-            let mut connection = Connection::new(url);
+            let mut connection = Connection::new(&url);
             let peer_id = connection.handshake(&infohash.to_vec());
 
             println!("Peer ID: {}", peer_id);
         }
         Commands::DownloadPiece(download_piece_args) => {
             println!("Download Piece Args: {:?}", download_piece_args);
+
+            let torrent_file = TorrentFile::parse_file_from_path(&download_piece_args.file_path)?;
+
+            let peers = torrent_file.discover_peers()?;
+
+            let peer1 = format!("{}:{}", peers[0].0, peers[0].1);
+
+            println!("Peer1 : {}", peer1);
+            let infohash = hash_bytes(&serde_bencode::to_bytes(&torrent_file.info)?);
+            let mut connection = Connection::new(&peer1);
+
+            let peer_id = connection.handshake(&infohash.to_vec());
+
+            println!("Peer Id: {}", peer_id);
         }
     }
 

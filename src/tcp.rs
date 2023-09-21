@@ -10,7 +10,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(address: String) -> Self {
+    pub fn new(address: &String) -> Self {
         let stream = TcpStream::connect(address).expect("Connection Failed");
         Connection { stream }
     }
