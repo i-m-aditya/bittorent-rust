@@ -9,6 +9,18 @@ pub struct Connection {
     pub stream: TcpStream,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum PeerMessage {
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have,
+    Bitfield,
+    Request,
+    Piece,
+    Cancel,
+}
 impl Connection {
     pub fn new(address: &String) -> Self {
         let stream = TcpStream::connect(address).expect("Connection Failed");
@@ -31,5 +43,55 @@ impl Connection {
         let response_peer_id = &response[response.len() - 20..];
         // println!("Peer ID: {}", bytes_to_hex(response_peer_id));
         return bytes_to_hex(response_peer_id);
+    }
+
+    pub fn wait(&mut self, id: PeerMessage) -> Vec<u8> {
+        // println!("Peer Message: {:?}", id);
+        let mut length_buf = [0; 4];
+        self.stream
+            .read_exact(&mut length_buf)
+            .expect("Failed to read length message");
+
+        let mut msg_type = [0; 1];
+        self.stream
+            .read_exact(&mut msg_type)
+            .expect("Failed to read mssage id");
+        if msg_type[0] != id.clone() as u8 {
+            panic!("Expected msg id {}, got {}", id as u8, msg_type[0]);
+        }
+
+        let payload_size = u32::from_be_bytes(length_buf) - 1;
+        let mut payload = vec![0; payload_size as usize];
+        self.stream
+            .read_exact(&mut payload)
+            .expect("Failed to read payload");
+        return payload;
+    }
+
+    pub fn send_interested(&mut self) {
+        self.send_message(PeerMessage::Interested, vec![]);
+    }
+
+    pub fn send_request(&mut self, piece_index: u32, begin: u32, length: u32) {
+        let mut payload = vec![0; 12];
+
+        payload[0..4].copy_from_slice(&piece_index.to_be_bytes());
+        payload[4..8].copy_from_slice(&begin.to_be_bytes());
+        payload[8..12].copy_from_slice(&length.to_be_bytes());
+        self.send_message(PeerMessage::Request, payload);
+    }
+
+    pub fn send_message(&mut self, id: PeerMessage, payload: Vec<u8>) {
+        let mut msg = vec![0; 5 + payload.len()];
+        let mut length = payload.len() as u32;
+        if length == 0 {
+            length = 1;
+        }
+        // println!("Hello");
+        msg[0..4].copy_from_slice(&(length).to_be_bytes());
+        msg[4] = id as u8;
+        msg[5..].copy_from_slice(&payload);
+
+        self.stream.write_all(&msg).unwrap();
     }
 }

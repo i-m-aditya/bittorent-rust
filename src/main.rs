@@ -1,7 +1,10 @@
+#[allow(non_snake_case)]
 use anyhow::Error;
 use clap::{Args, Parser, Subcommand};
-use std::net::SocketAddrV4;
-use tcp::Connection;
+use sha1::digest::typenum::U256;
+use std::{env, net::SocketAddrV4, path::Path};
+
+use tcp::{Connection, PeerMessage};
 mod tcp;
 
 use crate::{hasher::hash_bytes_and_hex, parser::TorrentFile};
@@ -58,7 +61,7 @@ enum Commands {
     DownloadPiece(DownloadPieceArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct DownloadPieceArgs {
     #[clap(short, long, help = "Peer address")]
     address: Option<SocketAddrV4>,
@@ -201,7 +204,7 @@ fn main() -> Result<(), Error> {
             println!("Peer ID: {}", peer_id);
         }
         Commands::DownloadPiece(download_piece_args) => {
-            println!("Download Piece Args: {:?}", download_piece_args);
+            // println!("Download Piece Args: {:?}", download_piece_args);
 
             let torrent_file = TorrentFile::parse_file_from_path(&download_piece_args.file_path)?;
 
@@ -209,13 +212,51 @@ fn main() -> Result<(), Error> {
 
             let peer1 = format!("{}:{}", peers[0].0, peers[0].1);
 
-            println!("Peer1 : {}", peer1);
+            // println!("Peer1 : {}", peer1);
             let infohash = hash_bytes(&serde_bencode::to_bytes(&torrent_file.info)?);
             let mut connection = Connection::new(&peer1);
 
-            let peer_id = connection.handshake(&infohash.to_vec());
+            let _ = connection.handshake(&infohash.to_vec());
 
-            println!("Peer Id: {}", peer_id);
+            // println!("Peer Id: {}", peer_id);
+
+            connection.wait(PeerMessage::Bitfield);
+            connection.send_interested();
+            connection.wait(PeerMessage::Unchoke);
+
+            let piece_index = download_piece_args.piece;
+            let piece_length = torrent_file.info.piece_length;
+
+            let CHUNKSIZE = 16 * 1024;
+
+            let block_cnt = piece_length / CHUNKSIZE + ((piece_length % CHUNKSIZE != 0) as u64);
+            let mut piece: Vec<u8> = vec![0; piece_length as usize];
+            for i in 0..block_cnt {
+                // println!("Index: {}", i);
+                let length = if i == block_cnt - 1 {
+                    piece_length - (i * CHUNKSIZE)
+                } else {
+                    CHUNKSIZE
+                };
+                // println!("Requesting block {} of length {}", i * CHUNKSIZE, length);
+                connection.send_request(piece_index as u32, (i * CHUNKSIZE) as u32, length as u32);
+
+                let payload = connection.wait(PeerMessage::Piece);
+
+                piece[(i * CHUNKSIZE) as usize..(i * CHUNKSIZE + length) as usize]
+                    .copy_from_slice(&payload[8..])
+            }
+
+            let hashed = hash_bytes(&piece);
+
+            // println!("Hashed:  {:?}", hashed);
+            let piece_hash: Vec<u8> = torrent_file.info.pieces.into_iter().take(20).collect();
+
+            let output_path = download_piece_args
+                .output
+                .unwrap_or_else(|| panic!("No output path provided!"));
+            std::fs::write(env::current_dir()?.join(Path::new(&output_path)), piece)?;
+            println!("Piece {} downloaded to {}.", piece_index, &output_path)
         }
     }
 
